@@ -1,0 +1,152 @@
+diff -r -c ./mainline-crack/fs/proc/base.c ./unkill/fs/proc/base.c
+*** ./mainline-crack/fs/proc/base.c	2020-10-11 00:47:33.932230826 +0300
+--- ./unkill/fs/proc/base.c	2020-10-11 02:31:43.661290501 +0300
+***************
+*** 1528,1533 ****
+--- 1528,1590 ----
+  
+  #endif /* CONFIG_SCHED_AUTOGROUP */
+  
++ 
++ static ssize_t killable_write(struct file *file, const char __user *buf,
++ 				size_t count, loff_t *offset)
++ {
++ 	struct inode *inode = file_inode(file);
++ 	struct task_struct *p;
++ 
++ 	int killable = 0; 
++ 	if (kstrtoint_from_user(buf, count, 10, &killable)) 
++ 		return -EFAULT; 
++ 
++ 	p = get_proc_task(inode);
++ 	if (!p)
++ 		return -ESRCH;
++ 
++ 	if (same_thread_group(current, p))
++ 		p->killable = killable; 
++ 	else
++ 		count = -EINVAL;
++ 
++ 	put_task_struct(p);
++ 
++ 	return count;
++ }
++ 
++ static int killable_show(struct seq_file *m, void *v)
++ {
++ 	struct inode *inode = m->private;
++ 	struct task_struct *p;
++ 
++ 	p = get_proc_task(inode);
++ 	if (!p)
++ 		return -ESRCH;
++ 
++ 	task_lock(p);
++ 	seq_printf(m, "%d\n", p->killable);
++ 	task_unlock(p);
++ 
++ 	put_task_struct(p);
++ 
++ 	return 0;
++ }
++ 
++ static int killable_open(struct inode *inode, struct file *filp)
++ {
++ 	return single_open(filp, killable_show, inode);
++ }
++ 
++ 
++ static const struct file_operations proc_pid_set_killable_operations = {
++ 	.open		= killable_open,
++ 	.read		= seq_read,
++ 	.write		= killable_write,
++ 	.llseek		= seq_lseek,
++ 	.release	= single_release,
++ };
++ 
+  static ssize_t comm_write(struct file *file, const char __user *buf,
+  				size_t count, loff_t *offset)
+  {
+***************
+*** 3300,3305 ****
+--- 3357,3363 ----
+  #ifdef CONFIG_SCHED_DEBUG
+  	REG("sched",     S_IRUGO|S_IWUSR, proc_pid_sched_operations),
+  #endif
++ 	REG("killable",	 S_IFREG|S_IRUGO|S_IWUSR, proc_pid_set_killable_operations),
+  	NOD("comm",      S_IFREG|S_IRUGO|S_IWUSR,
+  			 &proc_tid_comm_inode_operations,
+  			 &proc_pid_set_comm_operations, {}),
+diff -r -c ./mainline-crack/include/linux/init_task.h ./unkill/include/linux/init_task.h
+*** ./mainline-crack/include/linux/init_task.h	2020-10-11 00:47:34.204233924 +0300
+--- ./unkill/include/linux/init_task.h	2020-10-11 01:27:03.469164709 +0300
+***************
+*** 224,229 ****
+--- 224,230 ----
+   */
+  #define INIT_TASK(tsk)	\
+  {									\
++ 	.killable	= 0,						\
+  	INIT_TASK_TI(tsk)						\
+  	.state		= 0,						\
+  	.stack		= init_stack,					\
+diff -r -c ./mainline-crack/include/linux/sched.h ./unkill/include/linux/sched.h
+*** ./mainline-crack/include/linux/sched.h	2020-10-11 00:47:34.532237662 +0300
+--- ./unkill/include/linux/sched.h	2020-10-11 01:09:39.540795471 +0300
+***************
+*** 518,523 ****
+--- 518,528 ----
+  };
+  
+  struct task_struct {
++ 	/*
++ 	 * If killable = 0, process ignores SIGKILL and SIGSTOP
++ 	 * Default: killable = 1; 
++ 	 */
++ 	int 				killable; 
+  #ifdef CONFIG_THREAD_INFO_IN_TASK
+  	/*
+  	 * For reasons of header soup (see current_thread_info()), this
+***************
+*** 1277,1282 ****
+--- 1282,1292 ----
+  	return task_tgid_nr(tsk) == 1;
+  }
+  
++ static inline int is_unkillable(struct task_struct *tsk)
++ {
++ 	return !(tsk->killable);
++ }
++ 
+  extern struct pid *cad_pid;
+  
+  /*
+diff -r -c ./mainline-crack/kernel/fork.c ./unkill/kernel/fork.c
+*** ./mainline-crack/kernel/fork.c	2020-10-11 00:47:35.280246184 +0300
+--- ./unkill/kernel/fork.c	2020-10-11 01:29:01.622578944 +0300
+***************
+*** 2043,2048 ****
+--- 2043,2049 ----
+  
+  	p = copy_process(clone_flags, stack_start, stack_size,
+  			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
++ 	p->killable = 1; 
+  	add_latent_entropy();
+  	/*
+  	 * Do this prior waking up the new thread - the thread pointer
+diff -r -c ./mainline-crack/kernel/signal.c ./unkill/kernel/signal.c
+*** ./mainline-crack/kernel/signal.c	2020-10-11 00:47:35.300246412 +0300
+--- ./unkill/kernel/signal.c	2020-10-11 01:23:49.634864925 +0300
+***************
+*** 77,82 ****
+--- 77,86 ----
+  
+  	handler = sig_handler(t, sig);
+  
++ 	/* SIGKILL and SIGSTOP is ignored by unkillable process */
++ 	if (unlikely(is_unkillable(t) && sig_kernel_only(sig)))
++ 		return 1;
++ 
+  	if (unlikely(t->signal->flags & SIGNAL_UNKILLABLE) &&
+  	    handler == SIG_DFL && !(force && sig_kernel_only(sig)))
+  		return 1;
